@@ -1,0 +1,20 @@
+{
+  "name": "cargparse",
+  "version": "0.0.1",
+  "description": "A C++ constant expression argument parser",
+  "homepage": "https://github.com/nickelpro/cargparse",
+  "maintainers": [
+    "Vito Gamberini <vito@gamberini.email>"
+  ],
+  "license": "CC0-1.0",
+  "dependencies": [
+    "catch2"
+  ],
+  "vcpkg-configuration": {
+    "default-registry": {
+      "kind": "git",
+      "baseline": "a0400024711b283056538ac19ced80b91a83c24c",
+      "repository": "https://github.com/microsoft/vcpkg.git"
+    }
+  }
+}
