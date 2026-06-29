@@ -1,45 +1,7 @@
 export module cargparse;
 
 import std;
-
-namespace cargparse {
-
-struct PerfectHash {
-  std::size_t mask;
-  const std::size_t* table;
-
-  [[nodiscard]]
-  constexpr std::size_t lookup(std::string_view name) const {
-    if(!table)
-      return table_sentinel();
-    return table[pext(hash_string(name), mask)];
-  }
-
-  [[nodiscard]]
-  static constexpr std::size_t table_sentinel() {
-    return std::numeric_limits<std::size_t>::max();
-  }
-
-  static constexpr std::size_t hash_string(std::string_view s) {
-    std::size_t h = 14695981039346656037u;
-    for(auto c : s)
-      h = (h ^ static_cast<unsigned char>(c)) * 1099511628211u;
-    return h;
-  }
-
-  static constexpr std::size_t pext(std::size_t val, std::size_t m) {
-    std::size_t res = 0;
-    for(std::size_t bit = 0; m; ++bit) {
-      std::size_t low = m & (~m + 1);
-      if(val & low)
-        res |= std::size_t {1} << bit;
-      m ^= low;
-    }
-    return res;
-  }
-};
-
-} // namespace cargparse
+export import :hash;
 
 // ================================================================
 // Exported: core types
@@ -142,13 +104,13 @@ struct RuntimeArg {
     return nargs.max_ == 0 && implicit_value != nullptr;
   }
   [[nodiscard]]
-  constexpr std::string_view resolve(std::string_view name) const {
+  constexpr bool check(std::string_view name) const {
     if(primary_name == name)
-      return primary_name;
+      return true;
     for(std::size_t i = 0; i < alias_count; ++i)
       if(aliases[i] == name)
-        return primary_name;
-    return {};
+        return true;
+    return false;
   }
   [[nodiscard]]
   constexpr std::string names_csv(char sep = ',') const {
@@ -161,7 +123,7 @@ struct RuntimeArg {
 
 // Forward declaration: specializations are in the non-exported block.
 template <typename T>
-constexpr T convert_from_string(std::string_view sv);
+constexpr T convert_from_sv(std::string_view sv);
 
 // ================================================================
 // ArgSpec — transient builder
@@ -242,11 +204,6 @@ class ArgumentParser;
 
 class ParseResult {
 public:
-  ParseResult() = default;
-  ~ParseResult() = default;
-  ParseResult(ParseResult&&) = default;
-  ParseResult& operator=(ParseResult&&) = default;
-
   template <typename T = std::string>
   [[nodiscard]]
   T get(std::string_view name) const;
@@ -267,21 +224,24 @@ public:
   }
   [[nodiscard]]
   explicit operator bool() const {
-    for(auto& [k, v] : entries_)
-      if(v.used)
-        return true;
-    return false;
+    return !entries_.empty();
   }
   [[nodiscard]]
-  const std::vector<std::string>& get_values(std::string_view name) const;
+  const std::vector<std::string_view>& get_values(std::string_view name) const;
 
 private:
   friend class ArgumentParser;
 
-  struct ValueEntry {
-    std::vector<std::string> values;
-    bool used = false;
-  };
+  ParseResult(PerfectHash hash, std::span<const RuntimeArg> args)
+      : hash_ {hash}, args_ {args} {}
+
+  [[nodiscard]]
+  constexpr const RuntimeArg* find_arg(std::string_view name) const {
+    auto idx = hash_.lookup(name);
+    if(idx < args_.size() && args_[idx].check(name))
+      return &args_[idx];
+    return nullptr;
+  }
 
   struct string_hash {
     using is_transparent = void;
@@ -299,8 +259,8 @@ private:
     }
   };
 
-  mutable std::unordered_map<std::string_view, ValueEntry, string_hash,
-      std::equal_to<>>
+  std::unordered_map<std::string_view, std::vector<std::string_view>,
+      string_hash, std::equal_to<>>
       entries_;
   PerfectHash hash_;
   std::span<const RuntimeArg> args_;
@@ -310,19 +270,17 @@ private:
   [[nodiscard]]
   constexpr std::string_view resolve_name(std::string_view name) const {
     auto idx = hash_.lookup(name);
-    if(idx < args_.size() && !args_[idx].resolve(name).empty())
+    if(idx < args_.size() && args_[idx].check(name))
       return args_[idx].primary_name;
     return name;
   }
 
-  void set_used(std::string_view name, bool u = true) {
-    entries_[name].used = u;
+  void set_values(std::string_view name, std::vector<std::string_view> vals) {
+    entries_[name] = std::move(vals);
   }
-  void set_values(std::string_view name, std::vector<std::string> vals) {
-    entries_[name].values = std::move(vals);
-  }
-  void add_values(std::string_view name, const std::vector<std::string>& vals) {
-    auto& v = entries_[name].values;
+  void add_values(std::string_view name,
+      const std::vector<std::string_view>& vals) {
+    auto& v = entries_[name];
     for(auto& s : vals)
       v.push_back(s);
   }
@@ -442,48 +400,47 @@ constexpr void check_full_parse(std::errc ec, const char* ptr, const char* end,
 }
 
 template <typename T>
-constexpr T convert_from_string(std::string_view sv) {
+constexpr T convert_from_sv(std::string_view sv) {
   static_assert(sizeof(T) == 0, "Unsupported type for conversion");
   return {};
 }
 template <>
-constexpr int convert_from_string<int>(std::string_view sv) {
+constexpr int convert_from_sv<int>(std::string_view sv) {
   int val = 0;
   auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val);
   check_full_parse(ec, ptr, sv.data() + sv.size(), sv);
   return val;
 }
 template <>
-constexpr long convert_from_string<long>(std::string_view sv) {
+constexpr long convert_from_sv<long>(std::string_view sv) {
   long val = 0;
   auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val);
   check_full_parse(ec, ptr, sv.data() + sv.size(), sv);
   return val;
 }
 template <>
-constexpr long long convert_from_string<long long>(std::string_view sv) {
+constexpr long long convert_from_sv<long long>(std::string_view sv) {
   long long val = 0;
   auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val);
   check_full_parse(ec, ptr, sv.data() + sv.size(), sv);
   return val;
 }
 template <>
-constexpr unsigned int convert_from_string<unsigned int>(std::string_view sv) {
+constexpr unsigned int convert_from_sv<unsigned int>(std::string_view sv) {
   unsigned int val = 0;
   auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val);
   check_full_parse(ec, ptr, sv.data() + sv.size(), sv);
   return val;
 }
 template <>
-constexpr unsigned long convert_from_string<unsigned long>(
-    std::string_view sv) {
+constexpr unsigned long convert_from_sv<unsigned long>(std::string_view sv) {
   unsigned long val = 0;
   auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val);
   check_full_parse(ec, ptr, sv.data() + sv.size(), sv);
   return val;
 }
 template <>
-constexpr unsigned long long convert_from_string<unsigned long long>(
+constexpr unsigned long long convert_from_sv<unsigned long long>(
     std::string_view sv) {
   unsigned long long val = 0;
   auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val);
@@ -491,25 +448,23 @@ constexpr unsigned long long convert_from_string<unsigned long long>(
   return val;
 }
 template <>
-constexpr float convert_from_string<float>(std::string_view sv) {
-  std::string s(sv);
+constexpr float convert_from_sv<float>(std::string_view sv) {
   float val = 0;
-  auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), val,
+  auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val,
       std::chars_format::general);
-  check_full_parse(ec, ptr, s.data() + s.size(), sv);
+  check_full_parse(ec, ptr, sv.data() + sv.size(), sv);
   return val;
 }
 template <>
-constexpr double convert_from_string<double>(std::string_view sv) {
-  std::string s(sv);
+constexpr double convert_from_sv<double>(std::string_view sv) {
   double val = 0;
-  auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), val,
+  auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val,
       std::chars_format::general);
-  check_full_parse(ec, ptr, s.data() + s.size(), sv);
+  check_full_parse(ec, ptr, sv.data() + sv.size(), sv);
   return val;
 }
 template <>
-constexpr bool convert_from_string<bool>(std::string_view sv) {
+constexpr bool convert_from_sv<bool>(std::string_view sv) {
   if(sv == "true" || sv == "1" || sv == "TRUE" || sv == "yes" || sv == "True" ||
       sv == "YES")
     return true;
@@ -519,7 +474,7 @@ constexpr bool convert_from_string<bool>(std::string_view sv) {
   throw std::invalid_argument(std::format("cannot convert '{}' to bool", sv));
 }
 template <>
-constexpr std::string convert_from_string<std::string>(std::string_view sv) {
+constexpr std::string convert_from_sv<std::string>(std::string_view sv) {
   return std::string(sv);
 }
 
@@ -737,69 +692,6 @@ constexpr std::string generate_help(std::string_view program_name,
   return result;
 }
 
-// ================================================================
-
-constexpr std::size_t discover_mask(std::span<const std::size_t> keys) {
-  std::size_t n = keys.size();
-  if(n <= 1)
-    return 0;
-
-  std::size_t maxkey = 0;
-  for(auto k : keys)
-    maxkey |= k;
-  std::size_t mask = maxkey;
-
-  for(std::size_t bit = 0; bit < std::numeric_limits<std::size_t>::digits &&
-      std::size_t {1} << bit <= maxkey;
-      ++bit) {
-    std::size_t trial = mask & ~(std::size_t {1} << bit);
-    if(trial == mask)
-      continue;
-
-    bool ok = true;
-    for(std::size_t i = 0; i < n && ok; ++i) {
-      auto vi = keys[i] & trial;
-      for(std::size_t j = i + 1; j < n; ++j)
-        if((keys[j] & trial) == vi) {
-          ok = false;
-          break;
-        }
-    }
-    if(ok)
-      mask = trial;
-  }
-  return mask;
-}
-
-consteval PerfectHash make_perfect_hash(std::span<const char* const> names,
-    std::span<const std::size_t> indices) {
-  if(names.empty())
-    return {};
-  if(names.size() != indices.size())
-    throw std::invalid_argument("name/index size mismatch");
-
-  std::size_t n = names.size();
-  std::vector<std::size_t> keys(n);
-  for(std::size_t i = 0; i < n; ++i)
-    keys[i] = PerfectHash::hash_string(names[i]);
-
-  auto mask = discover_mask(keys);
-  auto pop = std::popcount(mask);
-  if(pop >= std::numeric_limits<std::size_t>::digits)
-    throw std::invalid_argument("hash table would exceed size_t width");
-  std::size_t lut_size = std::size_t {1} << pop;
-
-  std::vector<std::size_t> table(lut_size, PerfectHash::table_sentinel());
-
-  for(std::size_t i = 0; i < n; ++i) {
-    auto slot = PerfectHash::pext(keys[i], mask);
-    table[slot] = indices[i];
-  }
-
-  auto span = std::define_static_array(std::span(table));
-  return PerfectHash {mask, span.data()};
-}
-
 } // namespace cargparse
 
 // ================================================================
@@ -891,7 +783,7 @@ private:
 
 class ArgumentParser {
 public:
-  constexpr ArgumentParser(const char* program_name,
+  consteval ArgumentParser(const char* program_name,
       std::span<const RuntimeArg> args, PerfectHash hash, const char* help_data,
       std::size_t help_size, const char* usage_data, std::size_t usage_size,
       const char* version, bool add_help, bool add_version)
@@ -955,12 +847,9 @@ private:
     auto idx = hash_.lookup(name);
     if(idx < args_.size()) {
       auto& a = args_[idx];
-      if(!a.resolve(name).empty())
+      if(a.check(name))
         return &a;
     }
-    for(auto& a : args_)
-      if(!a.resolve(name).empty())
-        return &a;
     return nullptr;
   }
 
@@ -970,9 +859,7 @@ private:
   constexpr ParseResult parse_impl(
       std::span<const char* const> argv_args) const {
     auto args = preprocess_arguments(argv_args);
-    ParseResult result;
-    result.hash_ = hash_;
-    result.args_ = args_;
+    ParseResult result {hash_, args_};
 
     std::size_t positional_idx = 0;
     bool end_of_options = false;
@@ -1059,20 +946,15 @@ private:
       }
     }
 
-    if(add_help_ && (result.is_used("-h") || result.is_used("--help")))
+    if(add_help_ && result.is_used("--help"))
       result.help_requested_ = true;
-    if(add_version_ && (result.is_used("-v") || result.is_used("--version")))
+    if(add_version_ && result.is_used("--version"))
       result.version_requested_ = true;
 
     if(result.help_requested_ || result.version_requested_)
       return result;
 
-    // Post-parse defaults and validation
-    for(auto& a : args_) {
-      if(!result.is_used(a.primary_name) && a.default_value != nullptr)
-        result.set_values(a.primary_name, {std::string(a.default_value)});
-    }
-
+    // Post-parse validation
     for(auto& a : args_) {
       if(!a.is_optional)
         continue;
@@ -1161,30 +1043,28 @@ private:
           std::format("duplicate argument: {}", used_name));
 
     if(arg.is_flag()) {
-      pr.set_used(name);
       if(arg.repeatable)
-        pr.add_values(name, {std::string(arg.implicit_value)});
-      else if(pr.get_values(name).empty())
-        pr.set_values(name, {std::string(arg.implicit_value)});
+        pr.add_values(name, {arg.implicit_value});
+      else
+        pr.set_values(name, {arg.implicit_value});
       return start_idx + 1;
     }
 
     std::size_t next_idx = start_idx + 1;
-    std::vector<std::string> consumed;
+    std::vector<std::string_view> consumed;
 
     while(next_idx < args.size() && consumed.size() < arg.nargs.max_) {
       auto& nt = args[next_idx];
       if(!is_numeric_literal(nt) && nt.size() >= 1 && nt[0] == '-' &&
           nt != "--" && is_valid_optional_name(nt))
         break;
-      consumed.push_back(std::string(nt));
+      consumed.push_back(nt);
       ++next_idx;
     }
 
     if(consumed.size() < arg.nargs.min_) {
       if(arg.default_value != nullptr) {
-        pr.set_used(name);
-        pr.set_values(name, {std::string(arg.default_value)});
+        pr.set_values(name, {arg.default_value});
         return start_idx + 1;
       }
       throw std::invalid_argument(
@@ -1203,8 +1083,7 @@ private:
                   join(std::span(arg.choices, arg.choice_count), ", ")));
     }
 
-    pr.set_used(name);
-    if(arg.repeatable && pr.is_used(name))
+    if(arg.repeatable)
       pr.add_values(name, consumed);
     else
       pr.set_values(name, std::move(consumed));
@@ -1233,7 +1112,7 @@ private:
 
     auto name = arg->primary_name;
     std::size_t next_idx = start_idx;
-    std::vector<std::string> consumed;
+    std::vector<std::string_view> consumed;
 
     while(next_idx < args.size() && consumed.size() < arg->nargs.max_) {
       auto& nt = args[next_idx];
@@ -1241,14 +1120,13 @@ private:
         if(is_valid_optional_name(nt) && nt != "--")
           break;
       }
-      consumed.push_back(std::string(nt));
+      consumed.push_back(nt);
       ++next_idx;
     }
 
     if(consumed.size() < arg->nargs.min_) {
       if(arg->default_value != nullptr) {
-        pr.set_used(name);
-        pr.set_values(name, {std::string(arg->default_value)});
+        pr.set_values(name, {arg->default_value});
         return start_idx;
       }
       throw std::invalid_argument(
@@ -1266,7 +1144,6 @@ private:
               v, name, join(std::span(arg->choices, arg->choice_count), ", ")));
     }
 
-    pr.set_used(name);
     pr.set_values(name, std::move(consumed));
     return next_idx;
   }
@@ -1310,7 +1187,7 @@ consteval ArgumentParser ArgumentParserSpec::bake() const {
 
   std::span<const RuntimeArg> arg_span;
   if(!baked_args.empty()) {
-    auto span = std::define_static_array(std::span(baked_args));
+    auto span = std::define_static_array(baked_args);
     arg_span = span;
   }
 
@@ -1326,7 +1203,7 @@ consteval ArgumentParser ArgumentParserSpec::bake() const {
       arg_indices.push_back(ai);
     }
   }
-  auto hash = make_perfect_hash(std::span(all_names), std::span(arg_indices));
+  auto hash = make_perfect_hash(all_names, arg_indices, baked_args.size());
 
   return ArgumentParser(std::define_static_string(program_name_), arg_span,
       hash, help_data, help_str.size(), usage_data, usage_str.size(),
@@ -1341,49 +1218,67 @@ template <typename T>
 T ParseResult::get(std::string_view name) const {
   auto resolved = resolve_name(name);
   auto it = entries_.find(resolved);
-  if(it == entries_.end() || it->second.values.empty())
-    throw std::out_of_range(std::format("argument '{}' has no value", name));
-  if constexpr(!std::is_same_v<T, std::string> &&
-      requires(T& c, std::string v) {
-        typename T::value_type;
-        c.push_back(convert_from_string<typename T::value_type>(v));
-      }) {
-    T result;
-    for(auto& v : it->second.values)
-      result.push_back(convert_from_string<typename T::value_type>(v));
-    return result;
+
+  if(it != entries_.end()) {
+    if constexpr(!std::is_same_v<T, std::string> &&
+        requires(T& c, std::string v) {
+          typename T::value_type;
+          c.push_back(convert_from_sv<typename T::value_type>(v));
+        }) {
+      T result;
+      for(auto& v : it->second)
+        result.push_back(convert_from_sv<typename T::value_type>(v));
+      return result;
+    } else {
+      if(it->second.size() > 1)
+        throw std::out_of_range(
+            std::format("argument '{}' has multiple values; "
+                        "use get<vector<T>>()",
+                name));
+      return convert_from_sv<T>(it->second[0]);
+    }
   } else {
-    if(it->second.values.size() > 1)
-      throw std::out_of_range(
-          std::format("argument '{}' has multiple values; "
-                      "use get<vector<T>>()",
-              name));
-    return convert_from_string<T>(it->second.values[0]);
+    auto* arg = find_arg(resolved);
+    if(arg && arg->default_value) {
+      if constexpr(!std::is_same_v<T, std::string> &&
+          requires(T& c, std::string v) {
+            typename T::value_type;
+            c.push_back(convert_from_sv<typename T::value_type>(v));
+          }) {
+        T result;
+        result.push_back(convert_from_sv<typename T::value_type>(
+            arg->default_value));
+        return result;
+      } else {
+        return convert_from_sv<T>(arg->default_value);
+      }
+    }
   }
+
+  throw std::out_of_range(std::format("argument '{}' has no value", name));
 }
 
 template <typename T>
 std::optional<T> ParseResult::present(std::string_view name) const {
   auto resolved = resolve_name(name);
   auto it = entries_.find(resolved);
-  if(it == entries_.end() || !it->second.used)
+  if(it == entries_.end())
     return std::nullopt;
   return get<T>(name);
 }
 
 bool ParseResult::is_used(std::string_view name) const {
   auto resolved = resolve_name(name);
-  auto it = entries_.find(resolved);
-  return it != entries_.end() && it->second.used;
+  return entries_.find(resolved) != entries_.end();
 }
 
-const std::vector<std::string>& ParseResult::get_values(
+const std::vector<std::string_view>& ParseResult::get_values(
     std::string_view name) const {
   auto resolved = resolve_name(name);
   auto it = entries_.find(resolved);
   if(it == entries_.end())
     throw std::out_of_range(std::format("unknown argument: {}", name));
-  return it->second.values;
+  return it->second;
 }
 
 } // namespace cargparse

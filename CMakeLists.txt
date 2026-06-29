@@ -13,7 +13,7 @@ if(NOT DEFINED BUILD_TESTING)
 endif()
 
 option(CARGPARSE_BUILD_TESTS
-  "Build linker set tests. Default: ${BUILD_TESTING}"
+  "Build cargparse tests. Default: ${BUILD_TESTING}"
   ${BUILD_TESTING}
 )
 option(CARGPARSE_BUILD_EXAMPLE
@@ -30,9 +30,14 @@ set_target_properties(cargparse
 target_sources(cargparse
   PUBLIC
     FILE_SET CXX_MODULES
-    BASE_DIRS src
     FILES
       src/cargparse.cppm
+      src/cargparse-hash.cppm
+
+  PRIVATE
+    FILE_SET SOURCES
+    FILES
+      src/cargparse.cpp
 )
 target_compile_features(cargparse
   PUBLIC
